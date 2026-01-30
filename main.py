@@ -1,112 +1,119 @@
-import subprocess
 import os
+import sys
 import logging
-from dotenv import load_dotenv
+import subprocess
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from yt_dlp import YoutubeDL
 
-# Ensure yt-dlp is always updated
-subprocess.run(["pip", "install", "--upgrade", "yt-dlp"], check=True)
+# Setup logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    stream=sys.stdout
+)
 
-# Load environment variables from .env file
-load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-DOWNLOAD_FOLDER = './'
-os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # សារ welcome តាមភាសាខ្មែរ
-    welcome_message = """
-<b>𝗞𝗜𝗥𝗔𝗞 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗠𝗣𝟯 - 𝗕𝗢𝗧</b>
-
-សួស្តី! ជម្រាបសួរមកកាន់ KIRAK Download MP3 Bot
-
-📥 <b>របៀបប្រើប្រាស់:</b>
-គ្រាន់តែផ្ញើតំណ YouTube មកខ្ញុំ
-
-🌐 <b>គាំទ្រ:</b> YouTube, YouTube Shorts, YouTube Music
-🎧 <b>គុណភាព:</b> MP3 320kbps
-
-📞 <b>សម្រាប់ជំនួយ:</b> @kirak_itadori
-"""
-    
-    # សាកផ្ញើសារមុន
-    await update.message.reply_text("🟢")
-    
-    # URL រូបភាព
-    photo_url = "https://i.ibb.co/dJ6c0ctk/IMG-20260130-081334-718.jpg"
-    
+# Check FFmpeg
+def check_ffmpeg():
     try:
-        # ផ្ញើរូបភាព
-        await context.bot.send_photo(
-            chat_id=update.message.chat_id,
-            photo=photo_url,
-            caption=welcome_message,
-            parse_mode='HTML'
-        )
-        logging.info("✅ Welcome photo sent successfully")
-        
+        result = subprocess.run(['ffmpeg', '-version'], 
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            logging.info("✅ FFmpeg is available")
+            return True
+        else:
+            logging.error("❌ FFmpeg not working")
+            return False
     except Exception as e:
-        logging.error(f"❌ Error sending photo: {str(e)[:100]}")
-        
-        # សាកជំនួស URL ថ្មី
-        try:
-            # ប្រើ URL រូបភាពពី Telegram servers
-            alternative_url = "https://i.ibb.co/dJ6c0ctk/IMG-20260130-081334-718.jpg"
-            await context.bot.send_photo(
-                chat_id=update.message.chat_id,
-                photo=alternative_url,
-                caption=welcome_message,
-                parse_mode='HTML'
-            )
-            logging.info("✅ Alternative photo sent successfully")
-        except:
-            # បើមិនអាចផ្ញើរូបភាពទេ ផ្ញើតែសារ
-            await update.message.reply_text(welcome_message, parse_mode='HTML')
-            logging.info("✅ Text-only welcome sent")
+        logging.error(f"❌ FFmpeg check failed: {e}")
+        return False
 
-async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ប្រសិនបើគេបញ្ជូន command កុំឲ្យដំណើរការ download
-    if update.message.text and update.message.text.startswith('/'):
+# Simple MP3 download without FFmpeg post-processing
+async def download_audio_simple(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    
+    if not url or ('youtube.com' not in url and 'youtu.be' not in url):
+        await update.message.reply_text("⚠️ សូមផ្ញើតំណ YouTube")
         return
     
-    chat_id = update.message.chat_id
-    user_message = update.message.text.strip() if update.message.text else ""
-
-    if user_message and ('youtube.com' in user_message or 'youtu.be' in user_message):
-        try:
-            youtube_url = user_message
+    try:
+        # Send initial message
+        await update.message.reply_text("📥 កំពុងទាញយក...")
+        
+        # Use yt-dlp to get direct audio URL
+        ydl_opts = {
+            'format': 'bestaudio[ext=m4a]/bestaudio',
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+        }
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            # Get video info
+            info = ydl.extract_info(url, download=False)
             
-            # ផ្ញើសារប្រាប់អ្នកប្រើ
-            await update.message.reply_text("📥 កំពុងទាញយក... សូមរង់ចាំសិន!")
+            # Send audio directly (no conversion)
+            await update.message.reply_text(f"🎵 បានទាញយក: {info.get('title', 'Audio')}")
             
-            # Download the audio using yt-dlp
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '320',
-                }],
-                'noplaylist': True,
-                'quiet': True,
-            }
+            # Try to send audio file
+            try:
+                # Download to temp file
+                temp_file = f"/tmp/{info['id']}.m4a"
+                ydl_opts_download = {
+                    'format': 'bestaudio[ext=m4a]',
+                    'outtmpl': temp_file,
+                    'quiet': True,
+                }
+                
+                with YoutubeDL(ydl_opts_download) as ydl2:
+                    ydl2.extract_info(url, download=True)
+                
+                # Send as audio (Telegram supports m4a)
+                with open(temp_file, 'rb') as audio_file:
+                    await context.bot.send_audio(
+                        chat_id=update.message.chat_id,
+                        audio=audio_file,
+                        title=info.get('title', 'Audio')[:50],
+                        performer=info.get('uploader', 'Unknown')[:30]
+                    )
+                
+                # Cleanup
+                os.remove(temp_file)
+                
+            except Exception as e:
+                logging.error(f"Send error: {e}")
+                await update.message.reply_text(f"❌ មិនអាចផ្ញើឯកសារ: {str(e)[:100]}")
+        
+    except Exception as e:
+        logging.error(f"Download error: {e}")
+        await update.message.reply_text(f"❌ កំហុស: {str(e)[:100]}")
 
-            with YoutubeDL(ydl_opts) as ydl:
-                info_dict = ydl.extract_info(youtube_url, download=True)
-                audio_file = ydl.prepare_filename(info_dict)
-                mp3_file_path = audio_file.rsplit('.', 1)[0] + '.mp3'
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎵 KIRAK MP3 BOT\n\n"
+        "Send YouTube link to download audio\n\n"
+        "📞 @KIRAK_SML"
+    )
 
-            # ផ្ញើសារប្រាប់ថាទាញយករួច
-            await update.message.reply_text("✅ ទាញយករួច! កំពុងផ្ញើ MP3...")
-            
-            # Send the MP3 file to the user
-            with open(mp3_file_path, 'rb') as audio:
+def main():
+    if not TOKEN:
+        logging.error("❌ TELEGRAM_BOT_TOKEN not set!")
+        return
+    
+    # Check system
+    has_ffmpeg = check_ffmpeg()
+    
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_audio_simple))
+    
+    logging.info(f"🤖 Bot starting (FFmpeg: {'✅' if has_ffmpeg else '❌'})")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main(            with open(mp3_file_path, 'rb') as audio:
                 await context.bot.send_audio(
                     chat_id=chat_id, 
                     audio=audio,
